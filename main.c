@@ -1,0 +1,241 @@
+#define F_CPU 8000000UL
+#include <util/delay.h>
+
+#include "../LIB/BIT_MATH.h"
+#include "../LIB/STD_TYPES.h"
+
+#include "../MCAL/ADC/ADC_int.h"
+#include "../MCAL/DIO/DIO_int.h"
+#include "../MCAL/EXTI/EXTI_int.h"
+#include "../MCAL/GIE/GIE_int.h"
+#include "../MCAL/USART/USART_int.h"
+#include "../MCAL/TIMERS/TIMERS_cfg.h"
+#include "../MCAL/TIMERS/TIMERS_int.h"
+#include "../HAL/KPD/KPD_int.h"
+#include "../HAL/LCD/LCD_int.h"
+////////////////////////////////////////////////
+/*used ports*/
+/*
+	KEYPAD PORTB ROWS 4,5,6,7
+	KEYPAD PORTB COLUMNS 0,1,2
+	#define LCD_CTRL_PORT 	DIO_PORTC
+	#define LCD_DATA_PORT 	DIO_PORTD
+	#define LCD_RS			DIO_PIN0
+	#define LCD_RW			DIO_PIN1
+	#define LCD_E			DIO_PIN2
+	ADC ON PORTA
+*/
+/////////////////////////////////////////////////
+#define LDRPIN     0   // ADC Channel 0
+#define LM35PIN    1   // ADC Channel 1
+#define MOTORPIN1  2   // PA2
+#define MOTORPIN2  3   // PA3
+#define TEMP_LED   4   // PA4
+
+/////////////////////////////////////////////////
+u8 motorState = 0;
+u8 overheatFlag = 0;
+
+u16 LM35_reading = 0;
+u16 LDR_reading = 0;
+u8 temp = 0;
+
+/////////////////////////////////////////////////
+void LDR_func(void);
+void MotorUp_Func(void);
+void MotorDown_Func(void);
+void motorstop(void);
+void ALARM_FUNC(void);
+void Welcome_Screen(void);
+
+/////////////////////////////////////////////////
+void main(void)
+{
+	Welcome_Screen();
+    MGIE_vEnableGlobalInterrupt();
+    MEXTI_vInit();
+    MTIMERS_vInit();
+    MADC_vInit();
+    MUSART_vInit();
+
+    // Input Pins
+    MDIO_vSetPinDir(DIO_PORTA, LM35PIN, DIO_INPUT);
+    MDIO_vSetPinDir(DIO_PORTA, LDRPIN, DIO_INPUT);
+
+    // Motor Control Output Pins
+    MDIO_vSetPinDir(DIO_PORTA, MOTORPIN1, DIO_OUTPUT);
+    MDIO_vSetPinDir(DIO_PORTA, MOTORPIN2, DIO_OUTPUT);
+
+    // LED or test pin output
+    MDIO_vSetPinDir(DIO_PORTA, TEMP_LED, DIO_OUTPUT);
+
+    // Set temperature alarm check every X ticks (adjust internally)
+    MTIMERS_vSetIntervalAsych_CB(ALARM_FUNC, 2000);
+    MTIMERS_vStartTimer(TIM_0);
+
+    while (1)
+    {
+        // Skip all logic if overheat occurred
+        if (overheatFlag)
+        {
+            motorstop();
+            continue;
+        }
+        
+        
+         LDR_func();
+
+       // _delay_ms(500);  
+    }
+}
+
+/////////////////////////////////////////////////
+void LDR_func(void)
+{
+    LDR_reading = MADC_u16AnalogRead(LDRPIN);
+
+    if (LDR_reading >= 800 && motorState == 0)
+    {
+
+        MotorUp_Func();
+        motorstop();
+        motorState = 1;
+    }
+    else if (LDR_reading < 700 && motorState == 1)
+    {
+        MotorDown_Func();
+        motorstop();
+        motorState = 0;
+    }
+}
+
+/////////////////////////////////////////////////
+/////////////////////////////////////////////////
+void MotorUp_Func(void)
+{
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN1, DIO_HIGH);
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN2, DIO_LOW);
+}
+
+void MotorDown_Func(void)
+{
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN1, DIO_LOW);
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN2, DIO_HIGH);
+}
+
+void motorstop(void)
+{
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN1, DIO_LOW);
+    MDIO_vSetPinVal(DIO_PORTA, MOTORPIN2, DIO_LOW);
+}
+
+/////////////////////////////////////////////////
+void ALARM_FUNC(void)
+{	static u8 tempState=0;
+    u32 reading = MADC_u16AnalogRead(CHANNEL_1);
+    u16 millivolts = (reading * 5000UL) / 1024;
+    u16 local_temp = millivolts / 10;
+    // USART Test Output
+       MUSART_vTransmit((local_temp / 10) + '0');
+       MUSART_vTransmit((local_temp % 10) + '0');
+       MUSART_vTransmit('\n');
+
+      if (local_temp >= 30 && local_temp < 60 && tempState == 0)
+       {
+    	  HLCD_vClearScreen();
+    	  HLCD_vSetCursorPosition(0,0);
+    	  HLCD_vDisplayString("Open Window");
+           MotorUp_Func();
+           tempState = 1;
+       }
+       else if (local_temp < 30)
+       {
+    	   HLCD_vClearScreen();
+    	   HLCD_vSetCursorPosition(0,0);
+    	   HLCD_vDisplayString("Close Window");
+           tempState = 0;
+           motorstop();
+       }
+    if (local_temp > 60)
+    {
+        overheatFlag = 1;
+        HLCD_vClearScreen();
+        HLCD_vSetCursorPosition(0,0);
+        HLCD_vDisplayString("alert!!");
+        HLCD_vSetCursorPosition(1,0);
+        HLCD_vDisplayString("Closing System");
+        MDIO_vSetPinVal(DIO_PORTA, TEMP_LED, DIO_HIGH);  // Overheat LED ON
+        motorstop();  // Stop motor 
+    }
+    else
+        MDIO_vSetPinVal(DIO_PORTA, TEMP_LED, DIO_LOW);  // Overheat LED ON
+
+
+}
+
+//KEYPAD
+u8 KeyPap[KPD_ROWS][KPD_COLS] =
+{
+    {'7', '8', '9'},
+    {'4', '5', '6'},
+    {'1', '2', '3'},
+    {'*', '0', '#'}
+};
+u8 key_enter[5];
+
+//THE WELCOME SCREEN
+void Welcome_Screen(void){
+	static alarm_var=0;
+
+
+	HLCD_vClearScreen();
+	HLCD_vSetCursorPosition(0, 0);
+	HLCD_vSendStr("Welcome Home");
+	_delay_ms(500);
+	HLCD_vSetCursorPosition(1, 0);
+	HLCD_vSendStr("Enter The key:");
+	_delay_ms(500);
+
+	HLCD_vClearScreen();
+	HLCD_vSetCursorPosition(0, 0);
+	HLCD_vSendStr("THE KEY IS:");
+	HLCD_vSetCursorPosition(1, 0);
+
+	for(u8 i = 0; i < 4; i++)
+	{
+		u8 key = NO_KEY;//if it high meaning no switch pressed
+		while(key == NO_KEY)//get out of the loop when sw pressed as low
+		{
+			key = HKPD_u8GetPressedKey(KeyPap);
+		}
+		key_enter[i] = key;
+		HLCD_vSendChar(key);  // Send as char (e.g., '1', '2')
+		_delay_ms(100);
+		HLCD_vSendChar('*');
+	}
+	key_enter[4] = '\0';
+
+	u8 pass_key[5]="1234";
+	_delay_ms(300);
+	HLCD_vClearScreen();
+	HLCD_vSetCursorPosition(0, 0);
+
+	if(strcmp(key_enter,pass_key)==0)
+	{
+		return;
+	}
+
+	else if(alarm_var==2){
+		HLCD_vSendStr("alarm");
+	}
+
+	else{
+		HLCD_vSendStr("wrong key");
+		alarm_var=alarm_var+1;
+		_delay_ms(300);
+		Welcome_Screen();
+	}
+
+
+}
+
